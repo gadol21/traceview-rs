@@ -1,4 +1,4 @@
-use std::{io, sync::mpsc, thread, time};
+use std::{io, sync::mpsc::{self, Sender}, thread, time};
 
 use clap::Parser as ClapParser;
 use event::{KeyEventKind, MouseEventKind};
@@ -36,6 +36,7 @@ enum AppMode {
 enum AppEvent {
     UiEvent(Event),
     CounterChanged(Option<u16>),
+    EtwEvent,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -77,7 +78,7 @@ impl App {
         }
     }
 
-    fn etw_callback(event: &EventRecord, schema_locator: &SchemaLocator) {
+    fn etw_callback(event: &EventRecord, schema_locator: &SchemaLocator, event_sender: &Sender<AppEvent>) {
         let Ok(schema) = schema_locator.event_schema(event) else {
             return;
         };
@@ -94,13 +95,20 @@ impl App {
         let props: Vec<String> = initial_props
             .into_iter()
             .chain(schema.properties().iter().map(|prop| {
-                format!(
-                    "{}: {}",
-                    prop.name,
-                    parser
-                        .try_parse::<String>(&prop.name)
-                        .expect(&format!("Failed parsing property {}", prop.name))
-                )
+                match parser
+                .try_parse::<String>(&prop.name) {
+                    Ok(value) => format!(
+                        "{}: {}",
+                        prop.name,
+                        value
+                    ),
+                    Err(_) => format!(
+                        "{}: {}",
+                        prop.name,
+                        "Error parsing value"
+                    ),
+                }
+                
             }))
             .collect();
 
@@ -116,6 +124,8 @@ impl App {
             5 => log::debug!(target: &provider, "{}", message),
             _ => (),
         }
+
+        //let _ = event_sender.send(AppEvent::EtwEvent);
     }
 
     pub fn start(
@@ -131,8 +141,14 @@ impl App {
         let providers = provider_names
             .iter()
             .map(|name| {
-                Provider::by_guid(tracelogging_to_guid(name).to_u128())
-                    .add_callback(Self::etw_callback)
+                let etw_tx = tx.clone();
+                let guid = if name.contains(".") {
+                    tracelogging_to_guid(name).to_u128()
+                } else {
+                    GUID::try_from(name.as_str()).unwrap().to_u128()
+                };
+                Provider::by_guid(guid)
+                    .add_callback(move |event, schema_locator| Self::etw_callback(event, schema_locator, &etw_tx))
                     .build()
             })
             .collect::<Vec<_>>();
@@ -162,6 +178,7 @@ impl App {
             match event {
                 AppEvent::UiEvent(event) => self.handle_ui_event(event),
                 AppEvent::CounterChanged(value) => self.update_progress_bar(event, value),
+                AppEvent::EtwEvent => ()
             }
             if self.mode == AppMode::Quit {
                 break;
