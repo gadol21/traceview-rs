@@ -1,4 +1,8 @@
-use std::{io, sync::mpsc::{self, Sender}, thread, time};
+use std::{
+    io,
+    sync::mpsc::{self, Sender},
+    thread, time,
+};
 
 use clap::Parser as ClapParser;
 use event::{KeyEventKind, MouseEventKind};
@@ -78,43 +82,38 @@ impl App {
         }
     }
 
-    fn etw_callback(event: &EventRecord, schema_locator: &SchemaLocator, event_sender: &Sender<AppEvent>) {
+    fn etw_callback(
+        event: &EventRecord,
+        schema_locator: &SchemaLocator,
+        event_sender: &Sender<AppEvent>,
+    ) {
         let Ok(schema) = schema_locator.event_schema(event) else {
             return;
         };
 
         let parser = Parser::create(event, &schema);
 
-        let event_name = event.event_name(); //schema.task_name();
-        let initial_props = if event_name.is_empty() {
+        //let event_name = event.event_name(); TODO:: May need to concat with task_name (if they are different)
+        let task_name = schema.task_name();
+        let initial_props = if task_name.is_empty() {
             vec![]
         } else {
-            vec![event_name]
+            vec![task_name]
         };
 
         let props: Vec<String> = initial_props
             .into_iter()
             .chain(schema.properties().iter().map(|prop| {
-                match parser
-                .try_parse::<String>(&prop.name) {
-                    Ok(value) => format!(
-                        "{}: {}",
-                        prop.name,
-                        value
-                    ),
-                    Err(_) => format!(
-                        "{}: {}",
-                        prop.name,
-                        "Error parsing value"
-                    ),
+                match parser.try_parse::<String>(&prop.name) {
+                    Ok(value) => format!("{}: {}", prop.name, value),
+                    Err(_) => format!("{}: {}", prop.name, "Error parsing value"),
                 }
-                
             }))
             .collect();
 
         let message = props.join(", ");
         let provider = schema.provider_name();
-
+        
         match event.level() {
             0 => (),
             1 => log::error!(target: &provider, "{}", message),
@@ -125,7 +124,7 @@ impl App {
             _ => (),
         }
 
-        //let _ = event_sender.send(AppEvent::EtwEvent);
+        let _ = event_sender.send(AppEvent::EtwEvent); // TODO:: change timed event
     }
 
     pub fn start(
@@ -141,14 +140,17 @@ impl App {
         let providers = provider_names
             .iter()
             .map(|name| {
+                eprintln!("Provname: {name}");
                 let etw_tx = tx.clone();
-                let guid = if name.contains(".") {
+                let guid = if !name.contains("-") {
                     tracelogging_to_guid(name).to_u128()
                 } else {
                     GUID::try_from(name.as_str()).unwrap().to_u128()
                 };
                 Provider::by_guid(guid)
-                    .add_callback(move |event, schema_locator| Self::etw_callback(event, schema_locator, &etw_tx))
+                    .add_callback(move |event, schema_locator| {
+                        Self::etw_callback(event, schema_locator, &etw_tx)
+                    })
                     .build()
             })
             .collect::<Vec<_>>();
@@ -178,7 +180,7 @@ impl App {
             match event {
                 AppEvent::UiEvent(event) => self.handle_ui_event(event),
                 AppEvent::CounterChanged(value) => self.update_progress_bar(event, value),
-                AppEvent::EtwEvent => ()
+                AppEvent::EtwEvent => (),
             }
             if self.mode == AppMode::Quit {
                 break;
